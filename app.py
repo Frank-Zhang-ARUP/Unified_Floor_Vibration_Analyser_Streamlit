@@ -123,8 +123,16 @@ else:
             mm=(bgaf>=fmin)&(bgaf<=min(fmax,bgaf[-1]));bgplot=(bgaf[mm],bgamp[mm])
         img=plots_png(name,t,a,f,amp,bgplot[0] if bgplot else None,bgplot[1] if bgplot else None,impact_times);figures.append((name,img))
         st.header(name);c1,c2,c3,c4=st.columns(4);c1.metric('Peak acceleration',f'{peak*1000:.3f} mm/s²');c2.metric('Measured RMS',f'{rms*1000:.3f} mm/s²');c3.metric('Background-corrected RMS',f'{corrected_rms*1000:.3f} mm/s²' if np.isfinite(corrected_rms) else 'N/A');c4.metric('Dominant response',f'{dom:.2f} Hz')
+# ---- Time history plot ----
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=t, y=a, name="Test"))
+
+fig.add_trace(
+    go.Scatter(
+        x=t,
+        y=a,
+        name="Test"
+    )
+)
 
 for z in impact_times:
     fig.add_vline(
@@ -140,7 +148,56 @@ fig.update_layout(
     height=350
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
+
+# ---- Peak amplitude spectrum ----
+m = (f >= fmin) & (f <= min(fmax, f[-1]))
+
+fig = go.Figure()
+
+fig.add_trace(
+    go.Scatter(
+        x=f[m],
+        y=amp[m],
+        name="Test"
+    )
+)
+
+if bgplot:
+    fig.add_trace(
+        go.Scatter(
+            x=bgplot[0],
+            y=bgplot[1],
+            name="Background"
+        )
+    )
+
+fig.update_layout(
+    xaxis_title="Frequency [Hz]",
+    yaxis_title="Peak acceleration [m/s²]",
+    height=350
+)
+
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
+
+st.dataframe(
+    pd.DataFrame(
+        peaks[:10],
+        columns=[
+            "Frequency_Hz",
+            "PSD_dB",
+            "Prominence_dB",
+            "Above_background_dB"
+        ]
+    ),
+    use_container_width=True
+)
           m=(f>=fmin)&(f<=min(fmax,f[-1]));fig=go.Figure(go.Scatter(x=f[m],y=amp[m],name='Test'))
         if bgplot:fig.add_trace(go.Scatter(x=bgplot[0],y=bgplot[1],name='Background'))
         fig.update_layout(xaxis_title='Frequency [Hz]',yaxis_title='Peak acceleration [m/s²]',height=350);st.plotly_chart(fig,use_container_width=True)
