@@ -204,12 +204,16 @@ def analyse_test(test_type, file, background):
                 event_freqs.append(natural_frequency)
             lo, hi = max(0, idx - int(0.15 * fs)), min(len(a), idx + int(0.5 * fs))
             event_peak = float(np.max(np.abs(a[lo:hi])))
+            decay = a[start:end]
+            decay_time = np.arange(len(decay)) / fs
             event_rows.append({
                 "Event": number,
                 "Time_s": idx / fs,
                 "Natural_frequency_Hz": natural_frequency,
                 "Peak_acceleration_mm_s2": event_peak * 1000,
                 "Above_background_dB": decay_peaks[0]["Above_background_dB"] if decay_peaks else np.nan,
+                "Decay_time": decay_time,
+                "Decay_acceleration": decay,
             })
 
     if event_freqs:
@@ -309,7 +313,7 @@ def create_excel(summary, results, images, background):
         ws.freeze_panes(4, 0)
         for test_type, result in results.items():
             peak_df = pd.DataFrame(result["peaks"][:10])
-            event_df = pd.DataFrame(result["events"])
+            event_df = pd.DataFrame([{k: v for k, v in row.items() if k not in ["Decay_time", "Decay_acceleration"]} for row in result["events"]])
             sheet_name = test_type[:31]
             peak_df.to_excel(writer, index=False, sheet_name=sheet_name, startrow=3)
             sh = writer.sheets[sheet_name]
@@ -391,6 +395,24 @@ def create_pdf(summary, results, images, background):
             fig.text(0.06, 0.06, "Arup Acoustics | Floor Vibration Test Analyser", fontsize=8, color="#666666")
             pdf.savefig(fig)
             plt.close(fig)
+
+            if test_type == "Heel Drop" and result["events"]:
+                for event in result["events"]:
+                    event_fig = plt.figure(figsize=(8.27, 11.69))
+                    event_fig.patches.extend([plt.Rectangle((0, 0.93), 1, 0.07, transform=event_fig.transFigure, color="#D71920", zorder=-1)])
+                    event_fig.text(0.06, 0.955, "Arup Acoustics", color="white", fontsize=18, weight="bold", va="center")
+                    event_fig.text(0.06, 0.89, f"Heel Drop Event {event['Event']} - Free Decay", fontsize=16, weight="bold", color="#17365D")
+                    event_fig.text(0.06, 0.845, f"Natural frequency: {event['Natural_frequency_Hz']:.2f} Hz", fontsize=10)
+                    event_fig.text(0.06, 0.815, f"Event peak acceleration: {event['Peak_acceleration_mm_s2']:.3f} mm/s²", fontsize=10)
+                    axd = event_fig.add_axes([0.10, 0.46, 0.82, 0.28])
+                    axd.plot(event["Decay_time"], event["Decay_acceleration"], linewidth=0.8, color="#17365D")
+                    axd.set_title("Free-decay acceleration used for frequency calculation")
+                    axd.set_xlabel("Time from decay-window start [s]")
+                    axd.set_ylabel("Acceleration [m/s²]")
+                    axd.grid(alpha=0.25)
+                    event_fig.text(0.06, 0.06, "Arup Acoustics | Floor Vibration Test Analyser", fontsize=8, color="#666666")
+                    pdf.savefig(event_fig)
+                    plt.close(event_fig)
     return output.getvalue()
 
 
@@ -449,6 +471,31 @@ if "analysis_output" in st.session_state:
             spectrum_fig.add_trace(go.Scatter(x=bg.spectrum_frequency[bmask], y=bg.spectrum_amplitude[bmask], name="Background"))
         spectrum_fig.update_layout(title="Peak Amplitude Spectrum", xaxis_title="Frequency [Hz]", yaxis_title="Peak acceleration amplitude [m/s²]", height=360)
         st.plotly_chart(spectrum_fig, use_container_width=True)
+
+        if test_type == "Heel Drop" and result["events"]:
+            st.markdown("### Individual heel-drop free-decay curves")
+            st.caption("Each chart shows the post-impact free-decay segment used to calculate that event's natural-frequency candidate.")
+            for event in result["events"]:
+                with st.expander(
+                    f"Heel Drop {event['Event']} | {event['Natural_frequency_Hz']:.2f} Hz | {event['Peak_acceleration_mm_s2']:.3f} mm/s²",
+                    expanded=False,
+                ):
+                    decay_fig = go.Figure()
+                    decay_fig.add_trace(
+                        go.Scatter(
+                            x=event["Decay_time"],
+                            y=event["Decay_acceleration"],
+                            name=f"HD{event['Event']} decay",
+                            line={"width": 1},
+                        )
+                    )
+                    decay_fig.update_layout(
+                        title=f"Heel Drop {event['Event']} - Free Decay used for frequency calculation",
+                        xaxis_title="Time from decay-window start [s]",
+                        yaxis_title="Acceleration [m/s²]",
+                        height=320,
+                    )
+                    st.plotly_chart(decay_fig, use_container_width=True)
     d1, d2 = st.columns(2)
     with d1:
         st.download_button("Download Excel report", output["excel"], "Arup_Acoustics_Floor_Vibration_Report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
