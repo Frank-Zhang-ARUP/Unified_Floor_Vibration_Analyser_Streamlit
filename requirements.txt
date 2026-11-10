@@ -1,8 +1,8 @@
-streamlit>=1.39
-numpy>=1.26
-pandas>=2.2
-scipy>=1.12
-plotly>=5.24
-matplotlib>=3.8
-xlsxwriter>=3.2
-openpyxl>=3.1
+streamlit>=1.39,<2
+numpy>=1.26,<3
+pandas>=2.2,<4
+scipy>=1.12,<2
+plotly>=5.24,<7
+matplotlib>=3.8,<4
+xlsxwriter>=3.2,<4
+openpyxl>=3.1,<4
