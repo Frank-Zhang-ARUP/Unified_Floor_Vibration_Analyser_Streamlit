@@ -156,8 +156,11 @@ def detect_impacts(a, fs):
 def make_background(file):
     if file is None:
         return None
+    report(3, "Reading WAV and decoding samples")
     fs, x = read_wav(file)
+    report(10, f"Loaded {len(x):,} samples at {fs:g} Hz")
     a = condition_signal(to_acceleration(x[:, 0]), fs)
+    report(22, "Filtering and calibration complete")
     pf, pdb = welch_psd(a, fs)
     sf, sa = peak_spectrum(a, fs)
     return BackgroundRecord(
@@ -170,7 +173,10 @@ def make_background(file):
     )
 
 
-def analyse_test(test_type, file, background):
+def analyse_test(test_type, file, background, monitor=None):
+    def report(percent, message):
+        if monitor is not None:
+            monitor(percent, message)
     fs, x = read_wav(file)
     a = condition_signal(to_acceleration(x[:, 0]), fs)
     t = np.arange(len(a)) / fs
@@ -180,15 +186,22 @@ def analyse_test(test_type, file, background):
         math.sqrt(max(0.0, measured_rms ** 2 - background.rms ** 2))
         if background is not None else np.nan
     )
+    report(28, "Calculating full-record peak spectrum")
     sf, sa = peak_spectrum(a, fs)
+    report(36, "Calculating full-record Welch PSD")
     pf, pdb = welch_psd(a, fs)
     peaks = extract_peaks(pf, pdb, background)
+    report(42, f"Found {len(peaks)} full-record spectral peak candidates")
     event_rows, impact_times, event_freqs = [], [], []
 
     if test_type == "Heel Drop":
+        report(45, "Detecting heel-drop impacts")
         impacts = detect_impacts(a, fs)
         impact_times = [float(i / fs) for i in impacts]
+        report(50, f"Detected {len(impacts)} heel-drop candidates")
         for number, idx in enumerate(impacts, start=1):
+            event_progress = 50 + int(45 * number / max(1, len(impacts)))
+            report(event_progress, f"Analysing heel drop {number}/{len(impacts)} at {idx/fs:.2f} s")
             start = idx + int(impact_transient_s * fs)
             end = min(
                 len(a),
@@ -224,6 +237,7 @@ def analyse_test(test_type, file, background):
         mask = (pf >= frequency_min_hz) & (pf <= min(frequency_max_hz, pf[-1]))
         dominant_frequency = float(pf[np.where(mask)[0][np.argmax(pdb[mask])]]) if np.any(mask) else np.nan
 
+    report(100, f"{test_type} analysis complete")
     return {
         "type": test_type,
         "file_name": file.name,
@@ -421,16 +435,66 @@ if st.button("Start analysis", type="primary", use_container_width=True):
     if not available:
         st.error("Upload at least one WAV file before starting the analysis.")
     else:
-        with st.spinner("Analysing WAV files and preparing reports..."):
+        status_box = st.status("Starting analysis...", expanded=True)
+        overall_bar = st.progress(0, text="Overall progress")
+        stage_text = st.empty()
+        detail_bar = st.progress(0, text="Current test")
+        log_box = st.empty()
+        log_lines = []
+
+        def log(message):
+            log_lines.append(message)
+            log_box.code("\n".join(log_lines[-10:]), language=None)
+
+        try:
+            stage_text.write("**Stage 1/7: Background**")
+            log("Reading and analysing background WAV...")
             background = make_background(background_file)
+            overall_bar.progress(10, text="Overall: background complete")
+            log("Background complete")
+
             results = {}
-            for test_type in ["Heel Drop", "Walking", "Running", "Jumping"]:
-                if uploaded_files[test_type] is not None:
-                    results[test_type] = analyse_test(test_type, uploaded_files[test_type], background)
+            selected = [t for t in ["Heel Drop", "Walking", "Running", "Jumping"] if uploaded_files[t] is not None]
+            stage_span = 65 / max(1, len(selected))
+
+            for test_index, test_type in enumerate(selected):
+                stage_text.write(f"**Analysing: {test_type}**")
+                detail_bar.progress(0, text=f"{test_type}: starting")
+                log(f"Starting {test_type}")
+
+                base = 10 + stage_span * test_index
+                def monitor(percent, message, test_type=test_type, base=base):
+                    detail_bar.progress(min(100, int(percent)), text=f"{test_type}: {message}")
+                    overall = int(min(75, base + stage_span * percent / 100))
+                    overall_bar.progress(overall, text=f"Overall: {overall}%")
+                    log(f"{test_type}: {message}")
+
+                results[test_type] = analyse_test(
+                    test_type,
+                    uploaded_files[test_type],
+                    background,
+                    monitor=monitor,
+                )
+
+            stage_text.write("**Stage 6/7: Preparing charts and Excel**")
+            overall_bar.progress(78, text="Overall: generating report figures")
+            detail_bar.progress(0, text="Generating report figures")
             summary = summary_dataframe(background, results)
-            images = {name: chart_png(result, background) for name, result in results.items()}
+            images = {}
+            for i, (name, result) in enumerate(results.items(), start=1):
+                log(f"Rendering report chart: {name}")
+                images[name] = chart_png(result, background)
+                detail_bar.progress(int(100*i/max(1,len(results))), text=f"Charts: {i}/{len(results)}")
+
+            overall_bar.progress(86, text="Overall: generating Excel")
+            log("Generating Excel report")
             excel_bytes = create_excel(summary, results, images, background)
+
+            stage_text.write("**Stage 7/7: Preparing PDF**")
+            overall_bar.progress(92, text="Overall: generating PDF")
+            log("Generating A4 PDF report and heel-drop decay pages")
             pdf_bytes = create_pdf(summary, results, images, background)
+
             st.session_state["analysis_output"] = {
                 "background": background,
                 "results": results,
@@ -439,6 +503,14 @@ if st.button("Start analysis", type="primary", use_container_width=True):
                 "excel": excel_bytes,
                 "pdf": pdf_bytes,
             }
+            detail_bar.progress(100, text="Complete")
+            overall_bar.progress(100, text="Overall: complete")
+            log("Analysis and report generation complete")
+            status_box.update(label="Analysis complete", state="complete", expanded=False)
+        except Exception as exc:
+            status_box.update(label="Analysis stopped with an error", state="error", expanded=True)
+            st.exception(exc)
+            raise
 
 if "analysis_output" in st.session_state:
     output = st.session_state["analysis_output"]
