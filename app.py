@@ -153,21 +153,13 @@ def detect_impacts(a, fs):
     return np.asarray(refined, dtype=int)
 
 
-def make_background(file, monitor=None):
-    def bg_report(percent, message):
-        if monitor is not None:
-            monitor(percent, message)
+def make_background(file):
     if file is None:
         return None
-    bg_report(5, "Reading background WAV")
     fs, x = read_wav(file)
-    bg_report(30, f"Background loaded: {len(x):,} samples at {fs:g} Hz")
     a = condition_signal(to_acceleration(x[:, 0]), fs)
-    bg_report(55, "Background filtering complete")
     pf, pdb = welch_psd(a, fs)
-    bg_report(75, "Background PSD complete")
     sf, sa = peak_spectrum(a, fs)
-    bg_report(100, "Background analysis complete")
     return BackgroundRecord(
         rms=float(np.sqrt(np.mean(a ** 2))),
         peak=float(np.max(np.abs(a))),
@@ -178,15 +170,9 @@ def make_background(file, monitor=None):
     )
 
 
-def analyse_test(test_type, file, background, monitor=None):
-    def report(percent, message):
-        if monitor is not None:
-            monitor(percent, message)
-    report(5, "Reading WAV")
+def analyse_test(test_type, file, background):
     fs, x = read_wav(file)
-    report(15, f"Loaded {len(x):,} samples at {fs:g} Hz")
     a = condition_signal(to_acceleration(x[:, 0]), fs)
-    report(25, "Filtering and calibration complete")
     t = np.arange(len(a)) / fs
     measured_peak = float(np.max(np.abs(a)))
     measured_rms = float(np.sqrt(np.mean(a ** 2)))
@@ -194,21 +180,15 @@ def analyse_test(test_type, file, background, monitor=None):
         math.sqrt(max(0.0, measured_rms ** 2 - background.rms ** 2))
         if background is not None else np.nan
     )
-    report(32, "Calculating peak spectrum")
     sf, sa = peak_spectrum(a, fs)
-    report(40, "Calculating Welch PSD")
     pf, pdb = welch_psd(a, fs)
     peaks = extract_peaks(pf, pdb, background)
-    report(45, f"Found {len(peaks)} spectral peak candidates")
     event_rows, impact_times, event_freqs = [], [], []
 
     if test_type == "Heel Drop":
-        report(48, "Detecting heel-drop impacts")
         impacts = detect_impacts(a, fs)
         impact_times = [float(i / fs) for i in impacts]
-        report(52, f"Detected {len(impacts)} heel-drop candidates")
         for number, idx in enumerate(impacts, start=1):
-            report(52 + int(43 * number / max(1, len(impacts))), f"Decay analysis {number}/{len(impacts)}")
             start = idx + int(impact_transient_s * fs)
             end = min(
                 len(a),
@@ -244,7 +224,6 @@ def analyse_test(test_type, file, background, monitor=None):
         mask = (pf >= frequency_min_hz) & (pf <= min(frequency_max_hz, pf[-1]))
         dominant_frequency = float(pf[np.where(mask)[0][np.argmax(pdb[mask])]]) if np.any(mask) else np.nan
 
-    report(100, f"{test_type} complete")
     return {
         "type": test_type,
         "file_name": file.name,
@@ -445,7 +424,6 @@ if st.button("Start analysis", type="primary", use_container_width=True):
         status = st.status("Analysis running", expanded=True)
         overall = st.progress(0, text="Overall progress: 0%")
         current = st.progress(0, text="Current stage")
-        stage = st.empty()
         diagnostic = st.empty()
         logs = []
 
@@ -454,52 +432,42 @@ if st.button("Start analysis", type="primary", use_container_width=True):
             diagnostic.code("\n".join(logs[-12:]), language=None)
 
         try:
-            stage.write("**Background analysis**")
+            current.progress(0, text="Background")
             add_log("Starting background analysis")
-            def bg_monitor(percent, message):
-                current.progress(int(percent), text=message)
-                overall.progress(int(percent * 0.10), text=f"Overall progress: {int(percent * 0.10)}%")
-                add_log(message)
-            background = make_background(background_file, monitor=bg_monitor)
+            background = make_background(background_file)
+            overall.progress(10, text="Overall progress: 10%")
+            add_log("Background complete")
 
             results = {}
+            errors = {}
             selected = [t for t in ["Heel Drop", "Walking", "Running", "Jumping"] if uploaded_files[t] is not None]
-            for test_no, test_type in enumerate(selected):
-                base = 10 + int(65 * test_no / max(1, len(selected)))
-                span = 65 / max(1, len(selected))
-                stage.write(f"**Current test: {test_type}**")
+            for test_no, test_type in enumerate(selected, start=1):
+                current.progress(10, text=f"{test_type}: starting")
                 add_log(f"Starting {test_type}")
-                def test_monitor(percent, message, base=base, span=span, test_type=test_type):
-                    current.progress(int(percent), text=f"{test_type}: {message}")
-                    op = min(75, int(base + span * percent / 100))
-                    overall.progress(op, text=f"Overall progress: {op}%")
-                    add_log(f"{test_type}: {message}")
-                results[test_type] = analyse_test(test_type, uploaded_files[test_type], background, monitor=test_monitor)
+                try:
+                    results[test_type] = analyse_test(test_type, uploaded_files[test_type], background)
+                    add_log(f"{test_type}: complete")
+                except Exception as test_exc:
+                    errors[test_type] = str(test_exc)
+                    add_log(f"{test_type}: FAILED - {test_exc}")
+                pct = 10 + int(90 * test_no / max(1, len(selected)))
+                current.progress(100, text=f"{test_type}: finished")
+                overall.progress(pct, text=f"Overall progress: {pct}%")
 
-            stage.write("**Preparing charts**")
-            current.progress(0, text="Rendering report figures")
             summary = summary_dataframe(background, results)
-            images = {}
-            for n, (name, result) in enumerate(results.items(), 1):
-                add_log(f"Rendering chart {n}/{len(results)}: {name}")
-                images[name] = chart_png(result, background)
-                current.progress(int(100*n/max(1,len(results))), text=f"Charts {n}/{len(results)}")
-                overall.progress(75 + int(10*n/max(1,len(results))), text="Preparing charts")
-
-            stage.write("**Generating Excel report**")
-            add_log("Generating Excel report")
-            overall.progress(88, text="Generating Excel report")
-            excel_bytes = create_excel(summary, results, images, background)
-
-            stage.write("**Generating A4 PDF report**")
-            add_log("Generating PDF report, including heel-drop decay pages")
-            overall.progress(93, text="Generating A4 PDF report")
-            pdf_bytes = create_pdf(summary, results, images, background)
-
-            st.session_state["analysis_output"] = {"background": background, "results": results, "summary": summary, "images": images, "excel": excel_bytes, "pdf": pdf_bytes}
-            current.progress(100, text="Complete")
+            st.session_state["analysis_output"] = {
+                "background": background,
+                "results": results,
+                "summary": summary,
+                "errors": errors,
+            }
+            st.session_state.pop("excel_report", None)
+            st.session_state.pop("pdf_report", None)
+            st.session_state.pop("excel_error", None)
+            st.session_state.pop("pdf_error", None)
             overall.progress(100, text="Overall progress: 100%")
-            add_log("Complete")
+            current.progress(100, text="Numerical analysis complete")
+            add_log("Numerical analysis complete. Reports will be generated only when requested.")
             status.update(label="Analysis complete", state="complete", expanded=False)
         except Exception as exc:
             status.update(label="Analysis failed", state="error", expanded=True)
@@ -507,62 +475,130 @@ if st.button("Start analysis", type="primary", use_container_width=True):
 
 if "analysis_output" in st.session_state:
     output = st.session_state["analysis_output"]
-    st.markdown("## Summary")
-    st.dataframe(output["summary"], use_container_width=True, hide_index=True)
-    for test_type in ["Heel Drop", "Walking", "Running", "Jumping"]:
-        if test_type not in output["results"]:
-            continue
-        result = output["results"][test_type]
-        st.markdown(f"## {test_type}")
-        m1, m2, m3 = st.columns(3)
-        frequency_label = "Natural frequency" if test_type == "Heel Drop" else "Dominant frequency"
-        m1.metric(frequency_label, f"{result['dominant_frequency']:.2f} Hz")
-        m2.metric("Peak acceleration", f"{result['peak'] * 1000:.3f} mm/s²")
-        m3.metric("Measured RMS", f"{result['rms'] * 1000:.3f} mm/s²")
-        time_fig = go.Figure()
-        time_fig.add_trace(go.Scatter(x=result["time"], y=result["acceleration"], name="Test", line={"width": 1}))
-        for i, event_time in enumerate(result["impact_times"], start=1):
-            time_fig.add_vline(x=event_time, line_width=1, line_dash="dot", line_color="red")
-            time_fig.add_annotation(x=event_time, y=1, yref="paper", text=f"HD{i}", showarrow=False, textangle=-90)
-        time_fig.update_layout(title=f"{test_type} - Time History", xaxis_title="Time [s]", yaxis_title="Acceleration [m/s²]", height=360)
-        st.plotly_chart(time_fig, use_container_width=True)
-        spectrum_fig = go.Figure()
-        f, a = result["spectrum_frequency"], result["spectrum_amplitude"]
-        mask = (f >= frequency_min_hz) & (f <= min(frequency_max_hz, f[-1]))
-        spectrum_fig.add_trace(go.Scatter(x=f[mask], y=a[mask], name=test_type))
-        if output["background"] is not None:
-            bg = output["background"]
-            bmask = (bg.spectrum_frequency >= frequency_min_hz) & (bg.spectrum_frequency <= min(frequency_max_hz, bg.spectrum_frequency[-1]))
-            spectrum_fig.add_trace(go.Scatter(x=bg.spectrum_frequency[bmask], y=bg.spectrum_amplitude[bmask], name="Background"))
-        spectrum_fig.update_layout(title="Peak Amplitude Spectrum", xaxis_title="Frequency [Hz]", yaxis_title="Peak acceleration amplitude [m/s²]", height=360)
-        st.plotly_chart(spectrum_fig, use_container_width=True)
+    results = output["results"]
+    background = output["background"]
 
-        if test_type == "Heel Drop" and result["events"]:
-            st.markdown("### Individual heel-drop free-decay curves")
-            st.caption("Each chart shows the post-impact free-decay segment used to calculate that event's natural-frequency candidate.")
-            for event in result["events"]:
-                with st.expander(
-                    f"Heel Drop {event['Event']} | {event['Natural_frequency_Hz']:.2f} Hz | {event['Peak_acceleration_mm_s2']:.3f} mm/s²",
-                    expanded=False,
-                ):
-                    decay_fig = go.Figure()
-                    decay_fig.add_trace(
-                        go.Scatter(
-                            x=event["Decay_time"],
-                            y=event["Decay_acceleration"],
+    tab_names = ["Summary"] + [name for name in ["Heel Drop", "Walking", "Running", "Jumping"] if name in results] + ["Reports"]
+    tabs = st.tabs(tab_names)
+    tab_lookup = dict(zip(tab_names, tabs))
+
+    with tab_lookup["Summary"]:
+        st.markdown("## Summary")
+        st.dataframe(output["summary"], use_container_width=True, hide_index=True)
+        if output.get("errors"):
+            st.warning("Some tests could not be analysed; successful tests remain available below.")
+            for name, message in output["errors"].items():
+                st.error(f"{name}: {message}")
+        if background is not None:
+            c1, c2 = st.columns(2)
+            c1.metric("Background RMS", f"{background.rms * 1000:.3f} mm/s²")
+            c2.metric("Background peak", f"{background.peak * 1000:.3f} mm/s²")
+
+    for test_type in ["Heel Drop", "Walking", "Running", "Jumping"]:
+        if test_type not in results:
+            continue
+        result = results[test_type]
+        with tab_lookup[test_type]:
+            st.markdown(f"## {test_type}")
+            c1, c2, c3 = st.columns(3)
+            frequency_label = "Natural frequency" if test_type == "Heel Drop" else "Dominant frequency"
+            c1.metric(frequency_label, f"{result['dominant_frequency']:.2f} Hz")
+            c2.metric("Peak acceleration", f"{result['peak'] * 1000:.3f} mm/s²")
+            c3.metric("Measured RMS", f"{result['rms'] * 1000:.3f} mm/s²")
+
+            # Browser rendering only: decimate long time histories. Numerical analysis remains full resolution.
+            max_points = 12000
+            step = max(1, int(np.ceil(len(result["time"]) / max_points)))
+            time_fig = go.Figure()
+            time_fig.add_trace(go.Scatter(
+                x=result["time"][::step],
+                y=result["acceleration"][::step],
+                name="Test",
+                line={"width": 1},
+            ))
+            for i, event_time in enumerate(result["impact_times"], start=1):
+                time_fig.add_vline(x=event_time, line_width=1, line_dash="dot", line_color="red")
+                time_fig.add_annotation(x=event_time, y=1, yref="paper", text=f"HD{i}", showarrow=False, textangle=-90)
+            time_fig.update_layout(title=f"{test_type} - Time History", xaxis_title="Time [s]", yaxis_title="Acceleration [m/s²]", height=360)
+            st.plotly_chart(time_fig, use_container_width=True, key=f"time_{test_type}")
+
+            f = result["spectrum_frequency"]
+            a = result["spectrum_amplitude"]
+            mask = (f >= frequency_min_hz) & (f <= min(frequency_max_hz, f[-1]))
+            spectrum_fig = go.Figure()
+            spectrum_fig.add_trace(go.Scatter(x=f[mask], y=a[mask], name=test_type))
+            if background is not None:
+                bf = background.spectrum_frequency
+                ba = background.spectrum_amplitude
+                bmask = (bf >= frequency_min_hz) & (bf <= min(frequency_max_hz, bf[-1]))
+                spectrum_fig.add_trace(go.Scatter(x=bf[bmask], y=ba[bmask], name="Background"))
+            spectrum_fig.update_layout(title="Peak Amplitude Spectrum", xaxis_title="Frequency [Hz]", yaxis_title="Peak acceleration amplitude [m/s²]", height=360)
+            st.plotly_chart(spectrum_fig, use_container_width=True, key=f"spectrum_{test_type}")
+
+            if test_type == "Heel Drop" and result["events"]:
+                st.markdown("### Individual heel-drop free-decay curves")
+                for event in result["events"]:
+                    with st.expander(
+                        f"Heel Drop {event['Event']} | {event['Natural_frequency_Hz']:.2f} Hz | {event['Peak_acceleration_mm_s2']:.3f} mm/s²",
+                        expanded=False,
+                    ):
+                        decay_step = max(1, int(np.ceil(len(event["Decay_time"]) / 6000)))
+                        decay_fig = go.Figure()
+                        decay_fig.add_trace(go.Scatter(
+                            x=event["Decay_time"][::decay_step],
+                            y=event["Decay_acceleration"][::decay_step],
                             name=f"HD{event['Event']} decay",
                             line={"width": 1},
+                        ))
+                        decay_fig.update_layout(
+                            title=f"Heel Drop {event['Event']} - Free Decay Used for Frequency Calculation",
+                            xaxis_title="Time from decay-window start [s]",
+                            yaxis_title="Acceleration [m/s²]",
+                            height=320,
                         )
-                    )
-                    decay_fig.update_layout(
-                        title=f"Heel Drop {event['Event']} - Free Decay used for frequency calculation",
-                        xaxis_title="Time from decay-window start [s]",
-                        yaxis_title="Acceleration [m/s²]",
-                        height=320,
-                    )
-                    st.plotly_chart(decay_fig, use_container_width=True)
-    d1, d2 = st.columns(2)
-    with d1:
-        st.download_button("Download Excel report", output["excel"], "Arup_Acoustics_Floor_Vibration_Report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-    with d2:
-        st.download_button("Download A4 PDF report", output["pdf"], "Arup_Acoustics_Floor_Vibration_Report.pdf", "application/pdf", use_container_width=True)
+                        st.plotly_chart(decay_fig, use_container_width=True, key=f"decay_{event['Event']}")
+
+    with tab_lookup["Reports"]:
+        st.markdown("## Reports")
+        st.info("Reports are generated on demand. This keeps the main analysis fast and avoids holding large PDF/PNG objects in memory unless needed.")
+        r1, r2 = st.columns(2)
+        with r1:
+            if st.button("Generate Excel report", type="secondary", use_container_width=True):
+                try:
+                    with st.spinner("Generating Excel report..."):
+                        report_images = {name: chart_png(result, background) for name, result in results.items()}
+                        st.session_state["excel_report"] = create_excel(output["summary"], results, report_images, background)
+                        del report_images
+                except Exception as exc:
+                    st.session_state["excel_error"] = str(exc)
+            if "excel_error" in st.session_state:
+                st.error(f"Excel generation failed: {st.session_state['excel_error']}")
+            if "excel_report" in st.session_state:
+                st.download_button(
+                    "Download Excel report",
+                    st.session_state["excel_report"],
+                    "Arup_Acoustics_Floor_Vibration_Report.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+        with r2:
+            if st.button("Generate A4 PDF report", type="secondary", use_container_width=True):
+                try:
+                    with st.spinner("Generating A4 PDF report..."):
+                        report_images = {name: chart_png(result, background) for name, result in results.items()}
+                        st.session_state["pdf_report"] = create_pdf(output["summary"], results, report_images, background)
+                        del report_images
+                except Exception as exc:
+                    st.session_state["pdf_error"] = str(exc)
+            if "pdf_error" in st.session_state:
+                st.error(f"PDF generation failed: {st.session_state['pdf_error']}")
+            if "pdf_report" in st.session_state:
+                st.download_button(
+                    "Download A4 PDF report",
+                    st.session_state["pdf_report"],
+                    "Arup_Acoustics_Floor_Vibration_Report.pdf",
+                    "application/pdf",
+                    use_container_width=True,
+                )
+
